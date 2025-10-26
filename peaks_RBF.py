@@ -9,124 +9,167 @@ def peaks_function(x, y):
     term3 = -(1/3) * np.exp(-((x + 1)**2 + y**2))
     return term1 + term2 + term3
 
-class BPNetwork:
+
+def k_means_clustering(X, k, max_iters=100, seed=42):
+    """K-means聚类算法
     
-    def __init__(self, layer_sizes=[2, 64, 32, 1], seed=42):
+    参数:
+        X: 数据点 (n_samples, n_features)
+        k: 聚类中心数量
+        max_iters: 最大迭代次数
+        seed: 随机种子
+    
+    返回:
+        centers: 聚类中心 (k, n_features)
+        labels: 每个样本的簇标签
+    """
+    np.random.seed(seed)
+    n_samples, n_features = X.shape
+    
+    # 1. 随机初始化k个聚类中心
+    indices = np.random.choice(n_samples, k, replace=False)
+    centers = X[indices].copy()
+    
+    for iteration in range(max_iters):
+        # 2. 计算每个样本到各中心的距离，分配到最近的中心
+        distances = np.zeros((n_samples, k))
+        for i in range(k):
+            distances[:, i] = np.sum((X - centers[i])**2, axis=1)
+        
+        # 3. 为每个样本分配最近的聚类中心
+        labels = np.argmin(distances, axis=1)
+        
+        # 4. 更新聚类中心为各簇的均值
+        new_centers = np.zeros_like(centers)
+        for i in range(k):
+            cluster_points = X[labels == i]
+            if len(cluster_points) > 0:
+                new_centers[i] = cluster_points.mean(axis=0)
+            else:
+                new_centers[i] = centers[i]  # 保持原中心
+        
+        # 5. 检查收敛
+        if np.allclose(centers, new_centers):
+            break
+        
+        centers = new_centers
+    
+    # 重新计算最终的标签
+    distances = np.zeros((n_samples, k))
+    for i in range(k):
+        distances[:, i] = np.sum((X - centers[i])**2, axis=1)
+    labels = np.argmin(distances, axis=1)
+    
+    return centers, labels
+
+
+class RBFNetwork:
+    """RBF神经网络（用于函数逼近）
+    
+    网络结构: 输入层 -> RBF隐藏层 -> 线性输出层
+    """
+    
+    def __init__(self, n_centers=20, use_kmeans=True, seed=42):
         """
-        初始化网络
+        初始化RBF网络
         
         参数:
-            layer_sizes: 各层节点数列表 [输入层, 隐藏层1, 隐藏层2, ..., 输出层]
+            n_centers: RBF中心数量
+            use_kmeans: 是否使用K-means确定中心（True=广义RBF, False=正规化RBF）
             seed: 随机种子
         """
         np.random.seed(seed)
-        self.layer_sizes = layer_sizes
-        self.num_layers = len(layer_sizes)
+        self.n_centers = n_centers
+        self.use_kmeans = use_kmeans
+        self.centers = None
+        self.sigmas = None  # 每个中心独立的方差
+        self.weights = None
         
-        # 使用He初始化权重
-        self.weights = []
-        self.biases = []
-        for i in range(self.num_layers - 1):
-            w = np.random.randn(layer_sizes[i], layer_sizes[i+1]) * np.sqrt(2.0 / layer_sizes[i])
-            b = np.zeros((1, layer_sizes[i+1]))
-            self.weights.append(w)
-            self.biases.append(b)
-
-    def relu(self, z):
-        """ReLU激活函数"""
-        return np.maximum(0, z)
-
-    def relu_derivative(self, z):
-        """ReLU导数"""
-        return (z > 0).astype(float)
+    def _gaussian_rbf(self, X, center_idx):
+        """高斯径向基函数"""
+        return np.exp(-np.sum((X - self.centers[center_idx])**2, axis=1) / (2 * self.sigmas[center_idx]**2))
     
-    def linear(self, z):
-        """线性激活函数（用于回归输出层）"""
-        return z
-    
-    def linear_derivative(self, z):
-        """线性激活函数的导数"""
-        return np.ones_like(z)
-    
-    def forward(self, X):
-        """前向传播"""
-        activations = [X]
-        zs = []
-        
-        # 隐藏层使用ReLU
-        for i in range(self.num_layers - 2):
-            z = activations[-1].dot(self.weights[i]) + self.biases[i]
-            zs.append(z)
-            a = self.relu(z)
-            activations.append(a)
-        
-        # 输出层使用线性激活（回归任务）
-        z = activations[-1].dot(self.weights[-1]) + self.biases[-1]
-        zs.append(z)
-        a = self.linear(z)  # 回归任务使用线性输出
-        activations.append(a)
-        
-        return activations, zs
-    
-    def backward(self, X, y, activations, zs, learning_rate):
-        """反向传播"""
-        m = X.shape[0]
-        
-        # 输出层误差（MSE损失的梯度）
-        delta = (activations[-1] - y) * self.linear_derivative(zs[-1])
-        
-        # 反向传播
-        deltas = [delta]
-        for i in range(self.num_layers - 2, 0, -1):
-            delta = delta.dot(self.weights[i].T) * self.relu_derivative(zs[i-1])
-            deltas.insert(0, delta)
-        
-        # 更新权重和偏置
-        for i in range(self.num_layers - 1):
-            self.weights[i] -= learning_rate * activations[i].T.dot(deltas[i]) / m
-            self.biases[i] -= learning_rate * np.sum(deltas[i], axis=0, keepdims=True) / m
-    
-    def train(self, X_train, y_train, epochs=10000, batch_size=32, 
-              learning_rate=0.01, verbose=True, print_every=1000):
-        """训练网络
+    def fit(self, X_train, y_train):
+        """训练RBF网络
         
         参数:
             X_train: 训练数据 (n_samples, n_features)
             y_train: 训练标签 (n_samples, 1)
-            epochs: 训练轮数
-            batch_size: 批量大小
-            learning_rate: 学习率
-            verbose: 是否打印训练信息
-            print_every: 每隔多少轮打印一次
         """
         n_samples = X_train.shape[0]
         
-        for epoch in range(1, epochs + 1):
-            # 打乱训练数据
-            indices = np.random.permutation(n_samples)
-            X_train_shuffled = X_train[indices]
-            y_train_shuffled = y_train[indices]
+        # 1. 确定RBF中心
+        if self.use_kmeans:
+            # 广义RBF: 使用K-means聚类确定中心
+            print(f"   使用K-means聚类确定{self.n_centers}个RBF中心...")
+            self.centers, labels = k_means_clustering(X_train, self.n_centers)
             
-            # 小批量训练
-            for i in range(0, n_samples, batch_size):
-                X_batch = X_train_shuffled[i:i+batch_size]
-                y_batch = y_train_shuffled[i:i+batch_size]
-                
-                # 前向传播和反向传播
-                activations, zs = self.forward(X_batch)
-                self.backward(X_batch, y_batch, activations, zs, learning_rate)
+            # 2. 为每个中心计算独立的方差参数
+            self.sigmas = np.zeros(self.n_centers)
+            for i in range(self.n_centers):
+                cluster_points = X_train[labels == i]
+                if len(cluster_points) > 0:
+                    # 计算簇内样本到中心的平均距离
+                    dists = np.sqrt(np.sum((cluster_points - self.centers[i])**2, axis=1))
+                    self.sigmas[i] = np.mean(dists) if np.mean(dists) > 0 else 1.0
+                else:
+                    self.sigmas[i] = 1.0
+            print(f"   σ 范围: [{self.sigmas.min():.4f}, {self.sigmas.max():.4f}]")
+        else:
+            # 正规化RBF: 使用训练样本作为中心
+            print(f"   使用全部训练样本作为RBF中心（{n_samples}个）...")
+            self.centers = X_train.copy()
+            self.n_centers = n_samples
             
-            # 打印训练信息
-            if verbose and epoch % print_every == 0:
-                activations, _ = self.forward(X_train)
-                predictions = activations[-1]
-                mse = np.mean((y_train - predictions) ** 2)
-                print(f"Epoch {epoch}/{epochs}, MSE: {mse:.6f}")
+            # 计算所有中心之间的距离
+            distances = []
+            for i in range(self.n_centers):
+                for j in range(i+1, self.n_centers):
+                    dist = np.linalg.norm(self.centers[i] - self.centers[j])
+                    distances.append(dist)
+            
+            # 使用统一的方差
+            if distances:
+                d_max = np.max(distances)
+                sigma_uniform = 0.2
+                # sigma_uniform = d_max / np.sqrt(3 * self.n_centers)
+            else:
+                sigma_uniform = 1.0
+            
+            self.sigmas = np.full(self.n_centers, sigma_uniform)
+            print(f"   统一方差 σ = {sigma_uniform:.4f}")
+        
+        # 3. 计算隐藏层输出矩阵 Φ
+        phi = np.zeros((n_samples, self.n_centers))
+        for i in range(self.n_centers):
+            phi[:, i] = self._gaussian_rbf(X_train, i)
+        
+        # 4. 使用伪逆求解输出层权重
+        self.weights = np.linalg.pinv(phi).dot(y_train)
+        
+        # 计算训练误差
+        y_pred = phi.dot(self.weights)
+        mse = np.mean((y_train - y_pred)**2)
+        print(f"   训练完成，训练MSE: {mse:.6f}")
     
     def predict(self, X):
-        """预测"""
-        activations, _ = self.forward(X)
-        return activations[-1]
+        """预测
+        
+        参数:
+            X: 测试数据 (n_samples, n_features)
+        
+        返回:
+            预测值 (n_samples, 1)
+        """
+        n_samples = X.shape[0]
+        
+        # 计算隐藏层输出
+        phi = np.zeros((n_samples, self.n_centers))
+        for i in range(self.n_centers):
+            phi[:, i] = self._gaussian_rbf(X, i)
+        
+        # 计算输出
+        return phi.dot(self.weights)
 
 
 def sample_peaks_data(n_samples=200, seed=42):
@@ -176,23 +219,34 @@ def denormalize_output(z_norm, z_min, z_max):
     return (z_norm + 1) / 2 * (z_max - z_min) + z_min
 
 
-def bp_approximation():
+def rbf_approximation(use_kmeans=True, n_centers=30):
+    """使用RBF网络逼近Peaks函数
     
-    # 采样数据
-
+    参数:
+        use_kmeans: True=广义RBF, False=正规化RBF
+        n_centers: RBF中心数量（仅对广义RBF有效）
+    """
+    network_type = "generalized RBF network" if use_kmeans else "normal RBF network"
+    print(f"{network_type}逼近Peaks函数")
+    
+    # 1. 采样数据
     X_sample, z_sample = sample_peaks_data(n_samples=200, seed=42)
     
-    # 数据归一化
+    # 2. 数据归一化
     X_norm, z_norm, x_min, x_max, z_min, z_max = normalize_data(X_sample, z_sample)
     
-    # 构建和训练BP网络
-    net = BPNetwork(layer_sizes=[2, 64, 32, 1], seed=42)
+    # 3. 构建和训练RBF网络
+    print(f"构建{network_type}...")
+    if use_kmeans:
+        print(f"   RBF中心数量: {n_centers} (K-means聚类)")
+    else:
+        print(f"   RBF中心数量: {len(X_sample)} (使用全部训练样本)")
     
-    print(" 开始训练")
-    net.train(X_norm, z_norm, epochs=10000, batch_size=32, 
-              learning_rate=0.01, verbose=True, print_every=1000)
+    net = RBFNetwork(n_centers=n_centers, use_kmeans=use_kmeans, seed=42)
     
-    # 预测
+    net.fit(X_norm, z_norm)
+    
+    # 5. 预测
     x_test = np.linspace(-4, 4, 100)
     y_test = np.linspace(-4, 4, 100)
     X_grid, Y_grid = np.meshgrid(x_test, y_test)
@@ -209,11 +263,11 @@ def bp_approximation():
     # 真实值
     Z_true = peaks_function(X_grid, Y_grid)
     
-    # 可视化结果
-    print("\n6. 绘制结果...")
-    plot_comparison(X_sample, z_sample, X_grid, Y_grid, Z_true, Z_pred)
+    # 6. 可视化结果
+    plot_comparison(X_sample, z_sample, X_grid, Y_grid, Z_true, Z_pred, network_type)
     
-    # 计算误差
+    # 7. 计算误差
+    print("预测误差:")
     mse = np.mean((Z_true - Z_pred)**2)
     mae = np.mean(np.abs(Z_true - Z_pred))
     max_error = np.max(np.abs(Z_true - Z_pred))
@@ -230,35 +284,23 @@ def bp_approximation():
     print(f"   MSE: {sample_mse:.6f}")
     print(f"   MAE: {sample_mae:.6f}")
     
-    max_error = np.max(np.abs(Z_true - Z_pred))
-    print(f"\n 预测误差:")
-    print(f"   MSE (均方误差): {mse:.6f}")
-    print(f"   MAE (平均绝对误差): {mae:.6f}")
-    print(f"   最大绝对误差: {max_error:.6f}")
     
-    # 在采样点上的误差
-    z_sample_pred_norm = net.predict(X_norm)
-    z_sample_pred = denormalize_output(z_sample_pred_norm, z_min, z_max)
-    sample_mse = np.mean((z_sample - z_sample_pred)**2)
-    sample_mae = np.mean(np.abs(z_sample - z_sample_pred))
-    print(f"\n   训练样本上的误差:")
-    print(f"   MSE: {sample_mse:.6f}")
-    print(f"   MAE: {sample_mae:.6f}")
-    
+    return mse, mae
 
-def plot_comparison(X_sample, z_sample, X_grid, Y_grid, Z_true, Z_pred):
+
+def plot_comparison(X_sample, z_sample, X_grid, Y_grid, Z_true, Z_pred, network_type):
     """绘制采样点、真实函数和拟合结果的对比图"""
     
     fig = plt.figure(figsize=(18, 5))
     
     # 1. 采样点的3D散点图
     ax1 = fig.add_subplot(131, projection='3d')
-    scatter = ax1.scatter(X_sample[:, 0], X_sample[:, 1], z_sample.ravel(), 
-                         c='red', s=30, alpha=0.8)
+    ax1.scatter(X_sample[:, 0], X_sample[:, 1], z_sample.ravel(), 
+               c='red', s=30, alpha=0.8)
     ax1.set_xlabel('x', fontsize=11)
     ax1.set_ylabel('y', fontsize=11)
     ax1.set_zlabel('f(x, y)', fontsize=11)
-    ax1.set_title('sample point(200 sanple)', fontsize=13, fontweight='bold')
+    ax1.set_title('Sample Points (200 samples)', fontsize=13, fontweight='bold')
     ax1.view_init(elev=25, azim=45)
     
     # 2. 真实Peaks函数
@@ -268,29 +310,38 @@ def plot_comparison(X_sample, z_sample, X_grid, Y_grid, Z_true, Z_pred):
     ax2.set_xlabel('x', fontsize=11)
     ax2.set_ylabel('y', fontsize=11)
     ax2.set_zlabel('f(x, y)', fontsize=11)
-    ax2.set_title('true Peaks', fontsize=13, fontweight='bold')
+    ax2.set_title('True Peaks Function', fontsize=13, fontweight='bold')
     ax2.view_init(elev=25, azim=45)
     plt.colorbar(surf1, ax=ax2, shrink=0.5)
     
-    # 3. BP网络拟合结果
+    # 3. RBF网络拟合结果
     ax3 = fig.add_subplot(133, projection='3d')
     surf2 = ax3.plot_surface(X_grid, Y_grid, Z_pred, cmap='coolwarm', 
                              alpha=0.9, edgecolor='none', antialiased=True)
     # 叠加采样点
     ax3.scatter(X_sample[:, 0], X_sample[:, 1], z_sample.ravel(), 
-               c='green', s=10, alpha=0.5, label='训练样本')
+               c='green', s=10, alpha=0.5)
     ax3.set_xlabel('x', fontsize=11)
     ax3.set_ylabel('y', fontsize=11)
     ax3.set_zlabel('f(x, y)', fontsize=11)
-    ax3.set_title('BP result', fontsize=13, fontweight='bold')
+    ax3.set_title(f'{network_type} Result', fontsize=13, fontweight='bold')
     ax3.view_init(elev=25, azim=45)
     plt.colorbar(surf2, ax=ax3, shrink=0.5)
     
     plt.tight_layout()
-    plt.savefig('peaks_bp_approximation.png', dpi=150, bbox_inches='tight')
+    filename = f'peaks_rbf_{"generalized" if "广义" in network_type else "normalized"}.png'
+    plt.savefig(filename, dpi=150, bbox_inches='tight')
     plt.show()
-    
- 
+
+
 if __name__ == '__main__':
-    # 运行BP网络逼近
-    bp_approximation()
+
+    # 广义RBF网络 (使用K-means)
+    mse1, mae1 = rbf_approximation(use_kmeans=True, n_centers=30)
+    # 正规化RBF网络 (使用全部样本作为中心)
+    mse2, mae2 = rbf_approximation(use_kmeans=False)
+    
+    print(f"广义RBF (K-means, 30中心):  MSE={mse1:.6f}, MAE={mae1:.6f}")
+    print(f"正规化RBF (全部样本中心):   MSE={mse2:.6f}, MAE={mae2:.6f}")
+
+

@@ -211,7 +211,7 @@ def bp_approximation():
     Z_true = peaks_function(X_grid, Y_grid)
     
     # 可视化结果
-    print("\n6. 绘制结果...")
+    print("绘制结果...")
     plot_comparison(X_sample, z_sample, X_grid, Y_grid, Z_true, Z_pred)
     
     # 计算误差
