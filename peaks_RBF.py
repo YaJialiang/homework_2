@@ -9,7 +9,6 @@ def peaks_function(x, y):
     term3 = -(1/3) * np.exp(-((x + 1)**2 + y**2))
     return term1 + term2 + term3
 
-
 class BPNetwork:
     
     def __init__(self, layer_sizes=[2, 64, 32, 1], seed=42):
